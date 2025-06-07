@@ -1,0 +1,17 @@
+# Core Streamlit
+streamlit
+
+# Plotting and visualization
+plotly
+altair
+
+# Data processing
+pandas
+numpy
+
+# Database
+sqlalchemy
+
+# Additional utilities
+python-dateutil
+pytz

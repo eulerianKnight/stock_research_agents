@@ -1,0 +1,24 @@
+# Core dependenices
+anthropic
+python-dotenv
+sqlalchemy
+
+
+# Data & Analytics
+pandas
+numpy
+yfinance
+requests
+
+# Dashboard
+streamlit
+plotly
+altair
+
+# Development
+pytest
+black
+flake8
+
+# Async Support
+aiohttp
