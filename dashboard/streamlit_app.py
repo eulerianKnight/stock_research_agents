@@ -15,6 +15,9 @@ from datetime import datetime, timedelta
 import json
 import time
 from pathlib import Path
+import asyncio
+import logging
+
 
 # CRITICAL: Page config must be FIRST Streamlit command
 st.set_page_config(
@@ -47,6 +50,7 @@ try:
     from agents.analysis_agent import AnalysisAgent
     from agents.fact_checker_agent import FactCheckerAgent
     from agents.base_agent import Task
+    from main import StockResearchSystem
     
     imports_successful = True
     
@@ -60,14 +64,8 @@ def initialize_database_with_absolute_path():
     try:
         # DIRECT ABSOLUTE PATH - NO MORE RELATIVE PATH ISSUES!
         project_root_path = Path(project_root).resolve()
-        data_dir = project_root_path / "data"
+        data_dir = project_root_path / "src" / "data"
         db_file = data_dir / "stock_research.db"
-        
-        # Show paths for debugging
-        st.sidebar.info(f"📂 Project root: {project_root_path}")
-        st.sidebar.info(f"📂 Data dir: {data_dir}")
-        st.sidebar.info(f"🗄️ DB file: {db_file}")
-        st.sidebar.info(f"✅ DB exists: {db_file.exists()}")
         
         if not db_file.exists():
             st.error(f"❌ Database file not found at: {db_file}")
@@ -83,12 +81,10 @@ python main.py simple
         
         # Create database URL with ABSOLUTE path
         absolute_db_url = f"sqlite:///{db_file}"
-        st.sidebar.success(f"🗄️ Using DB URL: {absolute_db_url}")
         
         # Use the correct initialize_database function
         db_manager = initialize_database(absolute_db_url)
         
-        st.sidebar.success("✅ Database connected successfully!")
         return db_manager
         
     except Exception as e:
@@ -98,18 +94,25 @@ python main.py simple
         st.error(f"- Expected DB file: {project_root}/data/stock_research.db")
         st.error(f"- Current working dir: {os.getcwd()}")
         return None
+    
+def get_working_db_url():
+    """Gets the absolute path to the database file."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
+    db_file = Path(project_root) / "data" / "stock_research.db"
+    return f"sqlite:///{db_file.resolve()}"
 
 def display_agent_status():
     """Display current agent status"""
-    st.sidebar.markdown("### 🤖 Agent Status")
+    # st.sidebar.markdown("### 🤖 Agent Status")
     
     # Show import status first
-    if imports_successful:
-        st.sidebar.success("✅ All imports successful!")
-    else:
-        st.sidebar.error("❌ Import failed")
-        st.sidebar.error(f"Error: {import_error}")
-        return
+    # if imports_successful:
+    #     st.sidebar.success("✅ All imports successful!")
+    # else:
+    #     st.sidebar.error("❌ Import failed")
+    #     st.sidebar.error(f"Error: {import_error}")
+    #     return
     
     agent_info = [
         ("Research Agent", "research", "Collecting market data"),
@@ -130,6 +133,95 @@ def display_agent_status():
 def get_database_manager():
     """Get cached database manager instance"""
     return initialize_database_with_absolute_path()
+
+def run_fact_check_for_stock(symbol, db_url):
+    """Helper to run the data quality assessment for a single stock."""
+    async def _run():
+        system = StockResearchSystem(db_url_override=db_url)
+        result = None
+        try:
+            await system.initialize()
+            st.info(f"Running data quality checks for {symbol}...")
+            # Use our new direct method to get the results
+            result = await system.get_data_quality_assessment(symbol)
+        except Exception as e:
+            st.error(f"An error occurred during fact-checking: {e}")
+            logging.error(f"UI fact-check error for {symbol}: {e}", exc_info=True)
+        finally:
+            await system.shutdown()
+        
+        # Store the result in the session state to display it
+        if result:
+            st.session_state.fact_check_result = result
+
+    # ... (asyncio run logic)
+    try:
+        asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
+
+def show_fact_check():
+    """Show data quality and fact-checking interface"""
+    st.header("🔬 Fact-Check & Validation")
+    st.write("Assess the quality and consistency of the data for a selected stock.")
+
+    if not st.session_state.db_initialized:
+        st.warning("🔄 Database not initialized. Please check the sidebar for status.")
+        return
+
+    try:
+        db_manager = get_database_manager()
+        if not db_manager: return
+
+        with db_manager.get_session() as session:
+            stock_options = [s.symbol for s in session.query(Stock).filter(Stock.is_active == True).all()]
+
+        if not stock_options:
+            st.warning("No stocks found in database.")
+            return
+
+        selected_symbol = st.selectbox("Select a stock to fact-check:", stock_options)
+
+        if st.button("🔎 Assess Data Quality", help="Runs a comprehensive data quality check on the selected stock."):
+            # Clear previous results before running a new one
+            if 'fact_check_result' in st.session_state:
+                del st.session_state.fact_check_result
+                
+            with st.spinner(f"Running data validation for {selected_symbol}..."):
+                working_db_url = get_working_db_url()
+                run_fact_check_for_stock(selected_symbol, working_db_url)
+
+        st.markdown("---")
+
+        # Display the results if they exist in the session state
+        if 'fact_check_result' in st.session_state:
+            result = st.session_state.fact_check_result
+            st.subheader(f"Assessment Results for {result.get('symbol')}")
+
+            if result:
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Overall Quality Score", f"{result.get('overall_quality_score', 0):.2f}")
+                col2.metric("Quality Rating", str(result.get('quality_rating', 'N/A')).replace('_', ' ').title())
+                
+                # Display recommendations
+                st.write("**Recommendations:**")
+                recommendations = result.get('recommendations', [])
+                if recommendations:
+                    for rec in recommendations:
+                        st.success(f"✅ {rec}")
+                else:
+                    st.info("No specific recommendations.")
+
+                # Show the detailed JSON results in an expander
+                with st.expander("🔬 View Detailed Assessment JSON"):
+                    st.json(result)
+            else:
+                st.error("The assessment did not return any results.")
+
+    except Exception as e:
+        st.error(f"Error in fact-check tab: {e}")
 
 def show_overview():
     """Show system overview"""
@@ -203,130 +295,179 @@ def show_overview():
             import traceback
             st.code(traceback.format_exc())
 
+def run_full_flow_for_stock(symbol, db_url):
+    """Helper to run the full research and analysis flow for a single stock."""
+    async def _run():
+        system = StockResearchSystem(db_url_override=db_url)
+        try:
+            await system.initialize()
+            st.info(f"Step 1: Fetching latest data for {symbol}...")
+            await system.research_stock(symbol)
+            st.info(f"Step 2: Analyzing data for {symbol}...")
+            await system.analyze_stock(symbol, "comprehensive_analysis")
+            st.info("Full flow complete. Check the 'Reports' tab for the new report.")
+        except Exception as e:
+            st.error(f"An error occurred during the full flow: {e}")
+            logging.error(f"UI full flow error for {symbol}: {e}", exc_info=True)
+        finally:
+            await system.shutdown()
+
+    # This part handles the asyncio event loop correctly
+    try:
+        asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
+
+def run_analysis_for_stock(symbol, db_url):
+    """A helper function to run the analysis for a single stock."""
+    async def _run():
+        # Pass the working database URL directly to the system
+        system = StockResearchSystem(db_url_override=db_url)
+        try:
+            await system.initialize()
+            st.write(f"Analyzing {symbol}...")
+            await system.analyze_stock(symbol, "comprehensive_analysis")
+            st.write("Analysis complete. You can now refresh the 'Reports' tab.")
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            logging.error(f"UI analysis error for {symbol}: {e}", exc_info=True)
+        finally:
+            await system.shutdown()
+    
+    # Run the async function
+    try:
+        asyncio.run(_run())
+    except RuntimeError: # Handle case where an event loop is already running
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
+
 def show_stock_research():
     """Show stock research interface"""
     st.header("🔍 Stock Research")
-    st.write("Research and analyze individual stocks")
-    
+    st.write("Research and analyze individual stocks.")
+
     if not st.session_state.db_initialized:
         st.warning("🔄 Database not initialized. Please check the sidebar for status.")
         return
-    
-    # Stock selection
+
     try:
         db_manager = get_database_manager()
-        if not db_manager:
-            return
-            
-        # Get all stock information in one session to avoid detached instances
+        if not db_manager: return
+
         with db_manager.get_session() as session:
-            stocks_info = session.query(Stock.id, Stock.symbol, Stock.is_active).filter(Stock.is_active == True).all()
-            
-        if not stocks_info:
-            st.warning("No stocks found in database")
-            st.info("💡 To add stocks, run: `cd ../src && python main.py`")
+            stock_options = [s.symbol for s in session.query(Stock).filter(Stock.is_active == True).all()]
+
+        if not stock_options:
+            st.warning("No stocks found in database.")
             return
-            
-        # Create options using the data we retrieved
-        stock_options = {symbol: symbol for _, symbol, _ in stocks_info}
+
+        selected_symbol = st.selectbox("Select a stock:", stock_options)
+
+        st.markdown("---")
+        st.write("Choose an action for the selected stock:")
+
+        # Create a cleaner two-column layout for the buttons
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("🔬 Generate Analysis Report", help="Analyzes existing data in the database to create a new report."):
+                with st.spinner(f"Triggering analysis for {selected_symbol}..."):
+                    working_db_url = get_working_db_url()
+                    run_analysis_for_stock(selected_symbol, working_db_url)
+                st.success(f"✅ Analysis process finished for {selected_symbol}!")
+
+        with col2:
+            if st.button("🔄 Research & Analyze (Full Flow)", help="Fetches fresh data from APIs, saves it, and then runs a full analysis."):
+                with st.spinner(f"Triggering full research & analysis for {selected_symbol}..."):
+                    working_db_url = get_working_db_url()
+                    run_full_flow_for_stock(selected_symbol, working_db_url)
+                st.success(f"✅ Full research process finished for {selected_symbol}!")
         
-        if stock_options:
-            selected_symbol = st.selectbox("Select a stock to research:", list(stock_options.keys()))
+        st.markdown("---")
+
+        # Display current stock information (this part remains the same)
+        st.subheader(f"📈 {selected_symbol} Information")
             
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("🔍 Generate Research Report"):
-                    with st.spinner(f"Researching {selected_symbol}..."):
-                        st.success(f"✅ Research initiated for {selected_symbol}")
-                        st.info("Note: In a full implementation, this would trigger the research agent to gather data and generate a comprehensive report.")
-            
-            with col2:
-                if st.button("📊 View Price Data"):
-                    with st.spinner(f"Loading price data for {selected_symbol}..."):
-                        st.success(f"✅ Price data loaded for {selected_symbol}")
-                        st.info("Note: Price charts would be displayed here with historical data, volume, and technical indicators.")
-            
-            # Show current stock info
-            st.subheader(f"📈 {selected_symbol} Information")
-            
-            try:
-                with db_manager.get_session() as session:
-                    # Get stock info and price data in one session
-                    stock_info = session.query(Stock).filter(Stock.symbol == selected_symbol).first()
+        try:
+            with db_manager.get_session() as session:
+                # Get stock info and price data in one session
+                stock_info = session.query(Stock).filter(Stock.symbol == selected_symbol).first()
+                
+                if stock_info:
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Symbol", stock_info.symbol)
+                    with col2:
+                        st.metric("ID", stock_info.id)
+                    with col3:
+                        st.metric("Status", "Active" if stock_info.is_active else "Inactive")
                     
-                    if stock_info:
-                        col1, col2, col3 = st.columns(3)
+                    # Get recent price data within the same session
+                    recent_price = session.query(PriceData).filter(
+                        PriceData.stock_id == stock_info.id
+                    ).order_by(PriceData.date.desc()).first()
+                    
+                    if recent_price:
+                        st.subheader("💰 Latest Price Data")
+                        col1, col2, col3, col4, col5 = st.columns(5)
                         with col1:
-                            st.metric("Symbol", stock_info.symbol)
+                            st.metric("Close Price", f"₹{recent_price.close_price:.2f}")
                         with col2:
-                            st.metric("ID", stock_info.id)
+                            st.metric("Volume", f"{recent_price.volume:,}")
                         with col3:
-                            st.metric("Status", "Active" if stock_info.is_active else "Inactive")
+                            st.metric("High", f"₹{recent_price.high_price:.2f}")
+                        with col4:
+                            st.metric("Low", f"₹{recent_price.low_price:.2f}")
+                        with col5:
+                            st.metric("Date", recent_price.date.strftime("%Y-%m-%d"))
                         
-                        # Get recent price data within the same session
-                        recent_price = session.query(PriceData).filter(
+                        # Get historical data for mini chart
+                        historical_data = session.query(PriceData).filter(
                             PriceData.stock_id == stock_info.id
-                        ).order_by(PriceData.date.desc()).first()
+                        ).order_by(PriceData.date.desc()).limit(30).all()
                         
-                        if recent_price:
-                            st.subheader("💰 Latest Price Data")
-                            col1, col2, col3, col4, col5 = st.columns(5)
-                            with col1:
-                                st.metric("Close Price", f"₹{recent_price.close_price:.2f}")
-                            with col2:
-                                st.metric("Volume", f"{recent_price.volume:,}")
-                            with col3:
-                                st.metric("High", f"₹{recent_price.high_price:.2f}")
-                            with col4:
-                                st.metric("Low", f"₹{recent_price.low_price:.2f}")
-                            with col5:
-                                st.metric("Date", recent_price.date.strftime("%Y-%m-%d"))
+                        if len(historical_data) > 1:
+                            # Create a simple price chart
+                            dates = [price.date for price in reversed(historical_data)]
+                            prices = [price.close_price for price in reversed(historical_data)]
                             
-                            # Get historical data for mini chart
-                            historical_data = session.query(PriceData).filter(
-                                PriceData.stock_id == stock_info.id
-                            ).order_by(PriceData.date.desc()).limit(30).all()
-                            
-                            if len(historical_data) > 1:
-                                # Create a simple price chart
-                                dates = [price.date for price in reversed(historical_data)]
-                                prices = [price.close_price for price in reversed(historical_data)]
-                                
-                                import plotly.graph_objects as go
-                                fig = go.Figure()
-                                fig.add_trace(go.Scatter(
-                                    x=dates, 
-                                    y=prices,
-                                    mode='lines+markers',
-                                    name='Close Price',
-                                    line=dict(color='#00ff88', width=2),
-                                    marker=dict(size=4)
-                                ))
-                                fig.update_layout(
-                                    title=f"{selected_symbol} - Last 30 Days",
-                                    xaxis_title="Date",
-                                    yaxis_title="Price (₹)",
-                                    height=400,
-                                    showlegend=False,
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    paper_bgcolor='rgba(0,0,0,0)'
-                                )
-                                st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("No price data available for this stock.")
-                            st.info("💡 To add price data, run the full system: `cd ../src && python main.py`")
+                            import plotly.graph_objects as go
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=dates, 
+                                y=prices,
+                                mode='lines+markers',
+                                name='Close Price',
+                                line=dict(color='#00ff88', width=2),
+                                marker=dict(size=4)
+                            ))
+                            fig.update_layout(
+                                title=f"{selected_symbol} - Last 30 Days",
+                                xaxis_title="Date",
+                                yaxis_title="Price (₹)",
+                                height=400,
+                                showlegend=False,
+                                plot_bgcolor='rgba(0,0,0,0)',
+                                paper_bgcolor='rgba(0,0,0,0)'
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.error(f"Stock {selected_symbol} not found")
-                    
-            except Exception as e:
-                st.error(f"Error loading stock details: {e}")
-                # Add debug info
-                with st.expander("🔧 Debug Details"):
-                    st.write(f"Error type: {type(e).__name__}")
-                    st.write(f"Error message: {str(e)}")
-                    import traceback
-                    st.code(traceback.format_exc())
+                        st.info("No price data available for this stock.")
+                        st.info("💡 To add price data, run the full system: `cd ../src && python main.py`")
+                else:
+                    st.error(f"Stock {selected_symbol} not found")
+                
+        except Exception as e:
+            st.error(f"Error loading stock details: {e}")
+            # Add debug info
+            with st.expander("🔧 Debug Details"):
+                st.write(f"Error type: {type(e).__name__}")
+                st.write(f"Error message: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
                 
     except Exception as e:
         st.error(f"Error in stock research: {e}")
@@ -859,32 +1000,23 @@ def main():
     st.title("📈 Stock Research Multi-Agent System")
     st.markdown("*Powered by Research, Analysis, and Fact-Checking Agents*")
     
-    # Sidebar
-    display_agent_status()
     
-    # Main content tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Overview", 
-        "🔍 Stock Research", 
-        "📈 Technical Analysis", 
-        "✅ Data Quality", 
-        "📋 Reports"
-    ])
+    # Main content tabs - Add the new Fact-Check tab
+    tabs = ["📊 Overview", "🔍 Stock Research", "📈 Technical Analysis", "✅ Data Quality", "📋 Reports", "🔬 Fact-Check"]
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(tabs)
     
     with tab1:
         show_overview()
-    
     with tab2:
         show_stock_research()
-    
     with tab3:
         show_technical_analysis()
-    
     with tab4:
         show_data_quality()
-    
     with tab5:
         show_reports()
+    with tab6:
+        show_fact_check()
 
 if __name__ == "__main__":
     main()

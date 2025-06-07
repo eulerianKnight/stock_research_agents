@@ -3,6 +3,8 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
 import logging
+from pathlib import Path
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -47,6 +49,8 @@ class Config:
     """Main configuration class"""
     
     def __init__(self):
+        self.project_root = Path(__file__).parent.parent.parent
+
         self.api = APIConfig()
         self.database = DatabaseConfig()
         self.agents = AgentConfig()
@@ -69,7 +73,12 @@ class Config:
         self.api.api_timeout = int(os.getenv("API_TIMEOUT", "30"))
         
         # Database Configuration
-        self.database.database_url = os.getenv("DATABASE_URL", "sqlite:///data/stock_research.db")
+        default_db_path = self.project_root / "data" / "stock_research.db"
+        default_db_url = f"sqlite:///{default_db_path.resolve()}"
+        # Ensure the directory exists
+        os.makedirs(default_db_path.parent, exist_ok=True)
+
+        self.database.database_url = os.getenv("DATABASE_URL", default_db_url)
         self.database.max_connections = int(os.getenv("DB_MAX_CONNECTIONS", "5"))
         self.database.connection_timeout = int(os.getenv("DB_CONNECTION_TIMEOUT", "30"))
         
@@ -134,9 +143,9 @@ class Config:
         ]
         
         # Can be overridden via environment variable
-        env_symbols = os.getenv("STOCK_SYMBOLS", "")
-        if env_symbols:
-            return [symbol.strip() for symbol in env_symbols.split(",")]
+        # env_symbols = os.getenv("STOCK_SYMBOLS", "")
+        # if env_symbols:
+        #     return [symbol.strip() for symbol in env_symbols.split(",")]
         
         return default_symbols
     

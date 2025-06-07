@@ -8,7 +8,7 @@ import json
 
 from agents.base_agent import BaseAgent, Task
 from utils.config import config
-from data.database import stock_operations
+from data import database
 
 class ResearchAgent(BaseAgent):
     """Agent responsible for collecting stock market data from various sources"""
@@ -136,7 +136,6 @@ class ResearchAgent(BaseAgent):
             if hist.empty:
                 raise ValueError(f"No historical data found for {symbol}")
             
-            # Convert to list of dictionaries
             historical_data = []
             for date, row in hist.iterrows():
                 historical_data.append({
@@ -149,10 +148,10 @@ class ResearchAgent(BaseAgent):
                     "data_source": "yahoo_finance"
                 })
             
-            # Save to database
-            if stock_operations:
+           
+            if database.stock_operations:
                 await asyncio.get_event_loop().run_in_executor(
-                    None, stock_operations.save_price_data, symbol, historical_data
+                    None, database.stock_operations.save_price_data, symbol, historical_data
                 )
             
             result = {
@@ -160,15 +159,51 @@ class ResearchAgent(BaseAgent):
                 "period": period,
                 "interval": interval,
                 "data_count": len(historical_data),
-                "data": historical_data,
                 "timestamp": datetime.now()
             }
             
-            self.logger.info(f"Successfully fetched {len(historical_data)} historical records for {symbol}")
+            self.logger.info(f"Successfully fetched and saved {len(historical_data)} historical records for {symbol}")
             return result
             
         except Exception as e:
             self.logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
+            raise
+
+    async def _fetch_financial_data(self, symbol: str):
+        """Fetch financial metrics and ratios"""
+        self.logger.info(f"Fetching financial data for {symbol}")
+        
+        try:
+            await self._rate_limit_check("yahoo_finance")
+            
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            
+            financial_data = {
+                "symbol": symbol,
+                "pe_ratio": info.get("trailingPE"),
+                "pb_ratio": info.get("priceToBook"),
+                "eps": info.get("trailingEps"),
+                "return_on_equity": info.get("returnOnEquity"),
+                "return_on_assets": info.get("returnOnAssets"),
+                "revenue": info.get("totalRevenue"),
+                "debt_to_equity": info.get("debtToEquity"),
+                "dividend_yield": info.get("dividendYield"),
+                "net_income": info.get("netIncomeToCommon"),
+                "data_source": "yahoo_finance",
+                "timestamp": datetime.now()
+            }
+            
+            if database.stock_operations:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, database.stock_operations.save_financial_data, symbol, financial_data
+                )
+
+            self.logger.info(f"Successfully fetched and saved financial data for {symbol}")
+            return financial_data
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching financial data for {symbol}: {str(e)}")
             raise
     
     async def _fetch_company_info(self, symbol: str) -> Dict[str, Any]:
@@ -208,50 +243,35 @@ class ResearchAgent(BaseAgent):
             raise
     
     async def _fetch_financial_data(self, symbol: str):
-        """Fetch financial metrics and ratios"""
+        """Fetch financial metrics and ratios and save them to the database."""
         self.logger.info(f"Fetching financial data for {symbol}")
         
         try:
             await self._rate_limit_check("yahoo_finance")
-            
             ticker = yf.Ticker(symbol)
-            info = ticker.info
             
-            financial_data = {
-                "symbol": symbol,
-                "pe_ratio": info.get("trailingPE"),
-                "forward_pe": info.get("forwardPE"),
-                "pb_ratio": info.get("priceToBook"),
-                "ps_ratio": info.get("priceToSalesTrailing12Months"),
-                "peg_ratio": info.get("pegRatio"),
-                "eps": info.get("trailingEps"),
-                "forward_eps": info.get("forwardEps"),
-                "dividend_yield": info.get("dividendYield"),
-                "dividend_rate": info.get("dividendRate"),
-                "book_value": info.get("bookValue"),
-                "price_to_book": info.get("priceToBook"),
-                "return_on_equity": info.get("returnOnEquity"),
-                "return_on_assets": info.get("returnOnAssets"),
-                "profit_margin": info.get("profitMargins"),
-                "operating_margin": info.get("operatingMargins"),
-                "revenue": info.get("totalRevenue"),
-                "revenue_growth": info.get("revenueGrowth"),
-                "earnings_growth": info.get("earningsGrowth"),
-                "debt_to_equity": info.get("debtToEquity"),
-                "current_ratio": info.get("currentRatio"),
-                "quick_ratio": info.get("quickRatio"),
-                "beta": info.get("beta"),
-                "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
-                "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
-                "timestamp": datetime.now(),
-                "data_source": "yahoo_finance"
-            }
+            # Fetch the complete info dictionary once
+            financial_data = ticker.info
             
-            self.logger.info(f"Successfully fetched financial data for {symbol}")
+            if not financial_data:
+                self.logger.warning(f"No financial data returned from yfinance for {symbol}")
+                return None
+
+            # Add our own metadata
+            financial_data['symbol'] = symbol
+            financial_data['timestamp'] = datetime.now()
+            
+            # Save the fetched data to the database
+            if database.stock_operations:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, database.stock_operations.save_financial_data, symbol, financial_data
+                )
+
+            self.logger.info(f"Successfully fetched and queued save for financial data for {symbol}")
             return financial_data
             
         except Exception as e:
-            self.logger.error(f"Error fetching financial data for {symbol}: {str(e)}")
+            self.logger.error(f"Error in _fetch_financial_data for {symbol}: {str(e)}", exc_info=True)
             raise
     
     async def _fetch_market_news(self, symbol: str, count: int = 10):
@@ -280,7 +300,11 @@ class ResearchAgent(BaseAgent):
                     "symbol": symbol,
                     "data_source": "yahoo_finance"
                 }
-                news_data.append(news_item)
+            news_data.append(news_item)
+            if database.stock_operations and news_data:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, database.stock_operations.save_market_news, symbol, news_data
+                )
             
             result = {
                 "symbol": symbol,

@@ -145,7 +145,7 @@ class FactCheckerAgent(BaseAgent):
             # Get price data from database
             price_data = await self._get_price_data(symbol, timeframe)
             
-            if not price_data or price_data.empty:
+            if price_data is None or price_data.empty:
                 return {
                     "symbol": symbol,
                     "validation_status": "failed",

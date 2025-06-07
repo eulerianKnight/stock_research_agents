@@ -5,6 +5,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from contextlib import contextmanager
 from typing import Generator
 import logging
+from datetime import datetime
 
 from .models import (
     Base,
@@ -220,6 +221,73 @@ class StockDataOperations:
                     session.add(price_record)
 
             return True
+        
+    def save_financial_data(self, stock_symbol: str, financial_data_dict: dict):
+        """Save financial data for a stock."""
+        try:
+            with self.db.get_session() as session:
+                stock = session.query(Stock).filter(Stock.symbol == stock_symbol).first()
+                if not stock:
+                    self.logger.error(f"Stock {stock_symbol} not found, cannot save financial data.")
+                    return False
+
+                current_year = datetime.now().year
+                
+                # Check if a record for this stock and year already exists
+                existing = session.query(FinancialData).filter_by(stock_id=stock.id, year=current_year).first()
+
+                if not existing:
+                    record = FinancialData(
+                        stock_id=stock.id,
+                        period="Annual",
+                        year=current_year,
+                        revenue=financial_data_dict.get("totalRevenue"),
+                        net_income=financial_data_dict.get("netIncomeToCommon"),
+                        eps=financial_data_dict.get("trailingEps"),
+                        pe_ratio=financial_data_dict.get("trailingPE"),
+                        pb_ratio=financial_data_dict.get("priceToBook"),
+                        debt_to_equity=financial_data_dict.get("debtToEquity"),
+                        roe=financial_data_dict.get("returnOnEquity"),
+                        roa=financial_data_dict.get("returnOnAssets"),
+                        dividend_yield=financial_data_dict.get("dividendYield"),
+                        data_source="yahoo_finance"
+                    )
+                    session.add(record)
+                    self.logger.info(f"SUCCESS: Added new financial data for {stock_symbol} for {current_year}")
+                else:
+                    self.logger.info(f"INFO: Financial data for {stock_symbol} already exists for {current_year}")
+                return True
+        except Exception as e:
+            self.logger.error(f"CRITICAL ERROR saving financial data for {stock_symbol}: {e}", exc_info=True)
+            return False
+        
+    def save_market_news(self, stock_symbol: str, news_list: list):
+        """Save market news for a stock."""
+        try:
+            with self.db.get_session() as session:
+                stock = session.query(Stock).filter_by(symbol=stock_symbol).one_or_none()
+                if not stock:
+                    self.logger.warning(f"Stock {stock_symbol} not found for saving news.")
+                    return False
+
+                for news_item in news_list:
+                    # Check if news with the same URL already exists
+                    existing = session.query(MarketNews).filter_by(source_url=news_item.get("url")).first()
+                    if not existing and news_item.get("url"):
+                        record = MarketNews(
+                            stock_id=stock.id,
+                            title=news_item.get("title"),
+                            source_url=news_item.get("url"),
+                            source=news_item.get("publisher"),
+                            summary=news_item.get("summary"),
+                            published_at=news_item.get("published_at")
+                        )
+                        session.add(record)
+                self.logger.info(f"Saved {len(news_list)} news items for {stock_symbol}")
+                return True
+        except Exception as e:
+            self.logger.error(f"Error saving market news for {stock_symbol}: {e}", exc_info=True)
+            return False
 
     def save_research_report(self, stock_symbol: str, report_data):
         """Save a research report"""
